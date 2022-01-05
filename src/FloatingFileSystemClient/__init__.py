@@ -16,15 +16,18 @@ import gzip
 signal(SIGPIPE, SIG_DFL)
 
 FFS_CONFIG = {
-# you need host, port, and key
+    # you need host, port, and key,
+    # optinoal certificate_dir (default: /home/ffs/certificates)
 }
 
+
 def load_config():
-    try: 
+    try:
         c = json.loads(Path("/etc/ffs/client.json").read_text())
     except OSError:
         c = {}
     FFS_CONFIG.update(c)
+
 
 if os.path.exists("/home/ffs"):
     keys_dir = "/home/ffs/certificates"
@@ -34,7 +37,7 @@ else:
         os.makedirs(keys_dir)
 
 
-def create_keys():
+def create_keys(keys_dir):
     import zmq
     import zmq.auth
 
@@ -79,14 +82,14 @@ class FFS_Installer:
     def __init__(self, ffs_client):
         self.client = ffs_client
 
-    def install(self):
+    def install(self, keys_dir):
         print("Installing FFS-Node on local machine")
         self.check_ffs_user_exists()
         self.check_ffs_home_rights()
         public_ssh_key = self.create_ssh_keys()
         self.inform_sudoers()
         self.install_packages()
-        create_keys()
+        create_keys(keys_dir)
         self.download_node_code()
         ffs_storage_prefixes = self.check_ffs_zfs_present()
         print("")
@@ -147,7 +150,7 @@ class FFS_Installer:
         subprocess.check_call(["sudo", "chmod", "ugo+rwX", "/home/ffs", "-R"])
         subprocess.check_call(["sudo", "chmod", "ugo+rwX", "/home/ffs/.ssh", "-R"])
         zf.extractall("/home/ffs/")
-        Path('/home/ffs/node.log').touch()
+        Path("/home/ffs/node.log").touch()
         subprocess.check_call(["sudo", "chown", "ffs", "/home/ffs", "-R"])
         subprocess.check_call(["sudo", "chmod", "u-w,g-w,o-w", "/home/ffs"])
         subprocess.check_call(["sudo", "chmod", "u-w,g-w,o-w", "/home/ffs", "-R"])
@@ -155,9 +158,7 @@ class FFS_Installer:
         subprocess.check_call(
             ["sudo", "chmod", "0644", "/home/ffs/.ssh/authorized_keys"]
         )
-        subprocess.check_call(
-            ["sudo", "chmod", "0644", "/home/ffs/node.log"]
-        )
+        subprocess.check_call(["sudo", "chmod", "0644", "/home/ffs/node.log"])
 
         subprocess.check_call(["sudo", "chmod", "0600", "/home/ffs/.ssh/id_rsa"])
 
@@ -265,18 +266,19 @@ class FFS_Installer:
 
 
 class FFSClient:
-    def __init__(self, host, port, server_key, timeout=3000):
+    def __init__(self, host, port, server_key, keys_dir, timeout=3000):
         self.host = host
         self.port = port
         self.server_key = server_key
         self.timeout = timeout
-        create_keys()
+        self.keys_dir = keys_dir
+        create_keys(self.keys_dir)
 
     def load_keys(self):
         import zmq
 
         public_key, secret_key = zmq.auth.load_certificate(
-            os.path.join(keys_dir, "node.key_secret")
+            os.path.join(self.keys_dir, "node.key_secret")
         )
         return public_key, secret_key
 
@@ -351,15 +353,20 @@ class FFSClient:
                     client.send(request)
         context.term()
         if reply is None:
-            raise ValueError("No reply from server (%s:%s). Aborting" % (self.host, self.port))
-        if reply.startswith(b'GZIP'):
+            raise ValueError(
+                "No reply from server (%s:%s). Aborting" % (self.host, self.port)
+            )
+        if reply.startswith(b"GZIP"):
             reply = gzip.decompress(reply[4:])
         reply = json.loads(reply.decode("utf-8"))
         return reply
 
     def dispatch(self, args, parser):
         cmd = args.command
-        cmd = {"ls": "list_ffs", "q": "service_que",}.get(cmd, cmd)
+        cmd = {
+            "ls": "list_ffs",
+            "q": "service_que",
+        }.get(cmd, cmd)
         func_name = "cmd_" + cmd
         if hasattr(self, func_name):
             getattr(self, func_name)(args)
@@ -495,7 +502,7 @@ class FFSClient:
         self.render_que(filtered)
 
     def cmd_service_install(self, args):
-        FFS_Installer(self).install()
+        FFS_Installer(self).install(self.keys_dir)
 
     def cmd_service_free_space(self, args):
         print("Free space at engine startup")
@@ -700,7 +707,7 @@ class FFSClient:
             sys.exit(1)
         for ffs, ffs_info in full_info.items():
             main = ffs_info["targets"][0]
-            if main == 'NoMainAvailable':
+            if main == "NoMainAvailable":
                 continue
             main_props = ffs_info["properties"][main]
             iv = main_props.get("ffs:snapshot_interval", "-")
@@ -853,11 +860,10 @@ def iterate_parent_paths(path):
 
 def dispatch_args(args, parser):
     c = FFSClient(
-        args.host if args.host else FFS_CONFIG['host'],
-        args.port if args.port else FFS_CONFIG['port'],
-        (args.server_key if args.server_key else FFS_CONFIG['key']).encode(
-            "ascii"
-        ),
+        args.host if args.host else FFS_CONFIG["host"],
+        args.port if args.port else FFS_CONFIG["port"],
+        (args.server_key if args.server_key else FFS_CONFIG["key"]).encode("ascii"),
+        FFS_CONFIG.get("certificate_dir", "/home/ffs/certificates"),
         int(args.timeout) if args.timeout else 2500,
     )
     c.dispatch(args, parser)
@@ -1058,7 +1064,10 @@ def build_parser(server_opts_only=False):
             "capture_all_if_changed",
             "run capture --if_changed on every ffs (loop provided by central engine)",
         ),
-        ('list_disks', 'list all disks in zpools on all machines and their sizes (in bytes)'),
+        (
+            "list_disks",
+            "list all disks in zpools on all machines and their sizes (in bytes)",
+        ),
         ("main_less", "identify ffs that do not have a main"),
     ]
     for entry in service_choices:
@@ -1122,11 +1131,9 @@ def auto_complete(parser):
     args, remainder = server_opts_parser.parse_known_args(parts)
     load_config()
     c = FFSClient(
-        args.host if args.host else FFS_CONFIG['host'],
-        args.port if args.port else FFS_CONFIG['port'],
-        (args.server_key if args.server_key else FFS_CONFIG['key']).encode(
-            "ascii"
-        ),
+        args.host if args.host else FFS_CONFIG["host"],
+        args.port if args.port else FFS_CONFIG["port"],
+        (args.server_key if args.server_key else FFS_CONFIG["key"]).encode("ascii"),
         timeout=300,
     )
     so_far = remainder[1:]
@@ -1204,14 +1211,20 @@ def robust_rights(filename):
         gid = int(raw[2])
     return (rights, owner, gid)
 
+
 def check_user_group_ffs(allow_root):
     uid = os.getuid()
-    groups = subprocess.check_output(['id', '-Gn', str(uid)])[:-1].decode("utf-8").split(" ")
-    if not 'ffs_client' in groups and not (allow_root and uid == 0):
-        raise ValueError(f"Your user {uid} is not in the ffs_client group, groups was {groups}.")
+    groups = (
+        subprocess.check_output(["id", "-Gn", str(uid)])[:-1].decode("utf-8").split(" ")
+    )
+    if not "ffs_client" in groups and not (allow_root and uid == 0):
+        raise ValueError(
+            f"Your user {uid} is not in the ffs_client group, groups was {groups}."
+        )
+
 
 def main():
-    check_user_group_ffs('service_install' in sys.argv)
+    check_user_group_ffs("service_install" in sys.argv)
     parser = build_parser()
     if "--_completion" in sys.argv:
         auto_complete(parser)
