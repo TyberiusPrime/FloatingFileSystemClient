@@ -857,12 +857,17 @@ def iterate_parent_paths(path):
     for i in reversed(range(2, len(parts) + 1)):
         yield "/".join(parts[:i])
 
+def load_key(keystr):
+    if keystr.startswith('/'):
+        return Path(keystr).read_text().encode('ascii')
+    else:
+        return keystr.encode("ascii")
 
 def dispatch_args(args, parser):
     c = FFSClient(
         args.host if args.host else FFS_CONFIG["host"],
         args.port if args.port else FFS_CONFIG["port"],
-        (args.server_key if args.server_key else FFS_CONFIG["key"]).encode("ascii"),
+        (args.server_key if args.server_key else load_key(FFS_CONFIG["key"])),
         FFS_CONFIG.get("certificate_dir", "/home/ffs/certificates"),
         int(args.timeout) if args.timeout else 2500,
     )
